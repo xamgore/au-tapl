@@ -41,6 +41,17 @@ lT :: Symb -> Term -> Term
 lT = Lmb . TDecl
 ------------------------------------
 
+validEnv :: Env -> Bool
+validEnv                  [] = True
+validEnv ((TDecl _  ):decls) = validEnv decls
+validEnv ((VDecl _ t):decls) = (decls ||- t) && (validEnv decls)
+
+(||-) :: Env -> Type -> Bool
+e ||- (TIdx i)     | i < length e, (TDecl _) <- (e !! i) = True
+e ||- (l :-> r)    = (e ||- l) && (e ||- r)
+e ||- (ForAll s t) = (TDecl s : e) ||- t
+_ ||- _ = False
+
 shiftT :: Int -> Type -> Type
 shiftT = typeOn 0
 
@@ -102,6 +113,37 @@ nf t
   | Nothing   <- oneStep t = t
 
 
+infer :: Env -> Term -> Maybe Type
+infer e (Idx i)
+  | 0 <= i && i < length e
+  , (VDecl _ sigma) <- e !! i
+  , validEnv e = Just $ shiftT (i + 1) sigma
+
+infer e (t1 :@: t2)
+  | Just (sigma1 :-> tau) <- infer e t1
+  , Just sigma2           <- infer e t2
+  , sigma1 == sigma2 = Just $ tau
+
+infer e (Lmb var@(VDecl x sigma) t)
+  | e ||- sigma, Just tau <- infer (var:e) t
+    = Just $ sigma :-> (shiftT (-1) tau)
+
+infer e (t :@> tau)
+  | e ||- tau
+  , Just (ForAll alpha sigma) <- infer e t
+    = Just $ shiftT (-1) $ substTT 0 (shiftT 1 tau) sigma
+
+infer e (Lmb ty@(TDecl alpha) t)
+  | Just sigma <- infer (ty:e) t
+    = Just $ ForAll alpha sigma
+
+infer _ _ = Nothing
+
+infer0 :: Term -> Maybe Type
+infer0 = infer []
+
+
+
 -- типовой индекс в типе ссылается на номер объемлющего ForAll
 botF = ForAll "a" (TIdx 0)
 tArr  = TIdx 0 :-> TIdx 0
@@ -150,3 +192,27 @@ seven = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@
 eight = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))
 nine  = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0))))))))
 ten   = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))))
+
+
+
+-- Используя разработанную вами библиотеку для работы с System F
+-- в стиле Черча, реализуйте следующие функции
+
+isZero, suc, plus, mult, power :: Term
+isZero = lV "num" natT $ lT "a" $
+  (Idx 1 :@> (TIdx 0 :-> (TIdx 0 :-> TIdx 0))) :@:
+    (lV "x" (TIdx 0 :-> (TIdx 0 :-> TIdx 0)) $ fls :@> TIdx 1) :@: (tru :@> TIdx 0)
+
+suc = lV "num" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
+  (Idx 1) :@: ((Idx 3 :@> TIdx 2) :@: Idx 1 :@: Idx 0)
+
+plus = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
+  (Idx 4 :@> TIdx 2) :@: (Idx 1) :@: ((Idx 3 :@> TIdx 2) :@: Idx 1 :@: Idx 0)
+
+mult = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $
+  (Idx 3 :@> TIdx 1) :@: (Idx 2 :@> TIdx 1 :@: Idx 0)
+
+power = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
+  ((Idx 3 :@> (TIdx 2 :-> TIdx 2)) :@: (Idx 4 :@> TIdx 2)) :@: (Idx 1) :@: (Idx 0)
+
+pow = power

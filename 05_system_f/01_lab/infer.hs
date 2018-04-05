@@ -1,9 +1,8 @@
-import Control.Applicative ((<|>))
-
 type Symb = String
 
 infixl 2 :@:, :@>
 infixr 3 :->
+infix 1 ||-
 
 data Type = TIdx Int         -- типовой атом как индекс Де Брауна
           | Type :-> Type    -- стрелочный тип
@@ -41,12 +40,23 @@ lT :: Symb -> Term -> Term
 lT = Lmb . TDecl
 ------------------------------------
 
-shiftT :: Int -> Type -> Type
-shiftT = typeOn 0
+validEnv :: Env -> Bool
+validEnv                  [] = True
+validEnv ((TDecl _  ):decls) = validEnv decls
+validEnv ((VDecl _ t):decls) = (decls ||- t) && (validEnv decls)
 
-typeOn lvl val (TIdx i)     = TIdx $ if lvl <= i then i + val else i
-typeOn lvl val (tl :-> tr)  = typeOn lvl val tl :-> typeOn lvl val tr
-typeOn lvl val (ForAll s t) = ForAll s $ typeOn (succ lvl) val t
+(||-) :: Env -> Type -> Bool
+e ||- (TIdx i)     | i < length e, (TDecl _) <- (e !! i) = True
+e ||- (l :-> r)    = (e ||- l) && (e ||- r)
+e ||- (ForAll s t) = (TDecl s : e) ||- t
+_ ||- _ = False
+
+
+shiftT :: Int -> Type -> Type
+shiftT val = on 0 where
+  on lvl (TIdx i)     = TIdx $ if lvl <= i then i + val else i
+  on lvl (tl :-> tr)  = on lvl tl :-> on lvl tr
+  on lvl (ForAll s t) = ForAll s $ on (succ lvl) t
 
 -- выполняет подстановку в целевой тип tau типа sigma
 -- вместо свободной в tau переменной типа, связанной
@@ -56,50 +66,35 @@ substTT j sigma tau@(TIdx i) = if i == j then sigma else tau
 substTT j sigma (tl :-> tr)  = substTT j sigma tl :-> substTT j sigma tr
 substTT j sigma (ForAll s t) = ForAll s $ substTT (succ j) (shiftT 1 sigma) t
 
-shiftV :: Int -> Term -> Term
-shiftV val = on 0 where
-  on lvl (Idx i)      = Idx $ if lvl <= i then i + val else i
-  on lvl (tl :@: tr)  = on lvl tl :@: on lvl tr
-  on lvl (tl :@> ty)  = on lvl tl :@> typeOn lvl val ty
-  on lvl (Lmb d@(TDecl idx) t) = Lmb d $ on (succ lvl) t
-  on lvl (Lmb (VDecl x ty) t)  =
-    Lmb (VDecl x $ typeOn lvl val ty) (on (succ lvl) t)
 
--- выполняет подстановку в целевой терм u терма s
--- вместо свободной в u термовой переменной, связанной
--- с j-м связывателем во внешнем для u контексте.
-substVV :: Int -> Term -> Term -> Term
-substVV j s u@(Idx i)   = if i == j then s else u
-substVV j s (t1 :@: t2) = substVV j s t1 :@: substVV j s t2
-substVV j s (t1 :@> ty) = substVV j s t1 :@> ty
-substVV j s (Lmb dec t) = Lmb dec $ substVV (succ j) (shiftV 1 s) t
+infer :: Env -> Term -> Maybe Type
+infer e (Idx i)
+  | 0 <= i && i < length e
+  , (VDecl _ sigma) <- e !! i
+  , validEnv e = Just $ shiftT (i + 1) sigma
 
--- выполняет подстановку в целевой терм u типа tau
--- вместо свободной в u переменной типа, связанной
--- с i-м связывателем во внешнем для u контексте.
-substTV :: Int -> Type -> Term -> Term
-substTV _ _   u@(Idx _)            = u
-substTV i tau (t1 :@: t2)          = substTV i tau t1 :@: substTV i tau t2
-substTV i tau (t1 :@> ty)          = substTV i tau t1 :@> substTT i tau ty
-substTV i tau (Lmb (VDecl x ty) t) =
-  Lmb (VDecl x $ substTT i tau ty) (substTV (succ i) (shiftT 1 tau) t)
-substTV i tau (Lmb decl t) =
-  Lmb decl $ substTV (succ i) (shiftT 1 tau) t
+infer e (t1 :@: t2)
+  | Just (sigma1 :-> tau) <- infer e t1
+  , Just sigma2           <- infer e t2
+  , sigma1 == sigma2 = Just $ tau
 
+infer e (Lmb var@(VDecl x sigma) t)
+  | e ||- sigma, Just tau <- infer (var:e) t
+    = Just $ sigma :-> (shiftT (-1) tau)
 
-oneStep :: Term -> Maybe Term
-oneStep (Lmb decl t)              = Lmb decl <$> oneStep t
-oneStep (Lmb (VDecl _ _) t :@: s) = Just $ shiftV (-1) $ substVV 0 (shiftV 1 s) t
-oneStep (Lmb (TDecl _)   t :@> s) = Just $ shiftV (-1) $ substTV 0 (shiftT 1 s) t
-oneStep (tl :@: tr)               = (:@: tr) <$> oneStep tl <|> (tl :@:) <$> oneStep tr
-oneStep (tl :@> tr)               = (:@> tr) <$> oneStep tl
-oneStep _                         = Nothing
+infer e (t :@> tau)
+  | e ||- tau
+  , Just (ForAll alpha sigma) <- infer e t
+    = Just $ shiftT (-1) $ substTT 0 (shiftT 1 tau) sigma
 
+infer e (Lmb ty@(TDecl alpha) t)
+  | Just sigma <- infer (ty:e) t
+    = Just $ ForAll alpha sigma
 
-nf :: Term -> Term
-nf t
-  | Just next <- oneStep t = nf next
-  | Nothing   <- oneStep t = t
+infer _ _ = Nothing
+
+infer0 :: Term -> Maybe Type
+infer0 = infer []
 
 
 -- типовой индекс в типе ссылается на номер объемлющего ForAll
@@ -150,3 +145,41 @@ seven = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@
 eight = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))
 nine  = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0))))))))
 ten   = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))))
+
+
+
+--
+-- e1 = validEnv [VDecl "x" tArr, TDecl "a"]
+-- t1 = e1 == True
+--
+-- e2 = validEnv [TDecl "a", VDecl "x" tArr]
+-- t2 = e2 == False
+--
+-- e3 = [] ||- TIdx 0 :-> TIdx 0
+-- t3 = e3 == False
+--
+-- e4 = [TDecl "a"] ||- TIdx 0 :-> TIdx 0
+-- t4 = e4 == True
+--
+-- e5 = [] ||- ForAll "a" (TIdx 0 :-> TIdx 0)
+-- t5 = e5 == True
+--
+-- e6 = [TDecl "b",TDecl "a"] ||- TIdx 1 :-> TIdx 0
+-- t6 = e6 == True
+--
+-- e7 = [TDecl "a"] ||- ForAll "b" (TIdx 1 :-> TIdx 0)
+-- t7 = e7 == True
+--
+-- e8 = [] ||- ForAll "a" (ForAll "b" (TIdx 1 :-> TIdx 0))
+-- t8 = e8 == True
+--
+-- finaltest = and [t1, t2, t3, t4, t5, t6, t7, t8]
+
+e1 = infer0 sa0
+t1 = e1 == Just (ForAll "a" (TIdx 0) :-> ForAll "b" (TIdx 0))
+e2 = infer0 sa1
+t2 = e2 == Just (ForAll "a" (TIdx 0 :-> TIdx 0) :-> ForAll "b" (TIdx 0 :-> TIdx 0))
+e3 = infer0 sa2
+t3 = e3 == Just (ForAll "a" (TIdx 0 :-> TIdx 0) :-> ForAll "a" (TIdx 0 :-> TIdx 0))
+
+tests = t1 && t2 && t3
