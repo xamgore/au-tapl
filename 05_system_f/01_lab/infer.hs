@@ -125,8 +125,8 @@ cFlipF = lT "a" $ lT "b" $ lT "c" $ lV "f" (TIdx 2 :-> TIdx 1 :-> TIdx 0) $ lV "
 
 -- Кодирование булевых значений в System F
 boolT = ForAll "a" $ TIdx 0 :-> TIdx 0 :-> TIdx 0
-tru = lT "a" $ lV "t" (TIdx 0) $ lV "f" (TIdx 1) $ Idx 0
-fls = lT "a" $ lV "t" (TIdx 0) $ lV "f" (TIdx 1) $ Idx 1
+fls = lT "a" $ lV "t" (TIdx 0) $ lV "f" (TIdx 1) $ Idx 0
+tru = lT "a" $ lV "t" (TIdx 0) $ lV "f" (TIdx 1) $ Idx 1
 
 ifThenElse = lT "a" $ lV "v" boolT $ lV "x" (TIdx 1) $ lV "y" (TIdx 2) $ Idx 2 :@> TIdx 3 :@: Idx 1 :@: Idx 0
 notF = lV "v" boolT $ lT "a" $ lV "t" (TIdx 0) $ lV "f" (TIdx 1) $ Idx 3 :@> TIdx 2 :@: Idx 0 :@: Idx 1

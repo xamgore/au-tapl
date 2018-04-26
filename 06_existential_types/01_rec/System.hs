@@ -52,6 +52,7 @@ e ||- (l :-> r)    = (e ||- l) && (e ||- r)
 e ||- (ForAll s t) = (TDecl s : e) ||- t
 _ ||- _ = False
 
+
 shiftT :: Int -> Type -> Type
 shiftT = typeOn 0
 
@@ -193,26 +194,73 @@ eight = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@
 nine  = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0))))))))
 ten   = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))))
 
+-- Пары
+pF  = lT "sigma" $ lT "tau" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ lT "a" $ lV "f" (TIdx 4 :-> TIdx 3 :-> TIdx 0) $ Idx 0 :@: Idx 3 :@: Idx 2
+pFT = ForAll "sigma" $ ForAll "tau" $ TIdx 1 :-> TIdx 0 :-> (ForAll "a" $ (TIdx 2 :-> TIdx 1 :-> TIdx 0) :-> TIdx 0)
+pT = ForAll "a" $ (TIdx 2 :-> TIdx 1 :-> TIdx 0) :-> TIdx 0
+
+fstP = lT "sigma" $ lT "tau" $ lV "p" pT $ Idx 0 :@> TIdx 2 :@: (cKF    :@> TIdx 2 :@> TIdx 1) where
+  cKF = lT "a" $ lT "b" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ Idx 1
+sndP = lT "sigma" $ lT "tau" $ lV "p" pT $ Idx 0 :@> TIdx 1 :@: (cKastF :@> TIdx 2 :@> TIdx 1) where
+  cKastF = lT "a" $ lT "b" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ Idx 0
 
 
--- Используя разработанную вами библиотеку для работы с System F
--- в стиле Черча, реализуйте следующие функции
 
-isZero, suc, plus, mult, power :: Term
-isZero = lV "num" natT $ lT "a" $
-  (Idx 1 :@> (TIdx 0 :-> (TIdx 0 :-> TIdx 0))) :@:
-    (lV "x" (TIdx 0 :-> (TIdx 0 :-> TIdx 0)) $ fls :@> TIdx 1) :@: (tru :@> TIdx 0)
+-- rec
+
+-- xz (x: R) : pair R nat
+-- xz x = pair x 0
+xz = lT "R" $ lV "x" (TIdx 0) $ pF :@> TIdx 1 :@> natT :@: Idx 0 :@: zero
+
+
 
 suc = lV "num" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
   (Idx 1) :@: ((Idx 3 :@> TIdx 2) :@: Idx 1 :@: Idx 0)
 
-plus = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
-  (Idx 4 :@> TIdx 2) :@: (Idx 1) :@: ((Idx 3 :@> TIdx 2) :@: Idx 1 :@: Idx 0)
+
+-- fs (f: sigma -> nat -> sigma) (pair sigma nat) : pair sigma nat
+-- fs f p = pair (f (fst p) (snd p))  (succ (snd p))
+fs =
+  lT "sigma" $
+  lV "f" (TIdx 0 :-> natT :-> TIdx 0) $
+  lV "p" (ForAll "a" $ (sigma :-> natT :-> TIdx 0) :-> TIdx 0) $
+    pair :@: (f :@: (fst :@: p) :@: (snd :@: p)) :@: (suc :@: (snd :@: p))
+      where
+        (p, f, sigma) = (Idx 0, Idx 1, TIdx 2)
+        fst  = fstP :@> sigma :@> natT
+        snd  = sndP :@> sigma :@> natT
+        pair = pF   :@> sigma :@> natT
+
+
+-- rec (m : nat) (f : sigma -> nat -> sigma) (x : sigma) : sigma
+-- rec m f x = fst (m (fs f) (xz x))
+rec =
+  lT "sigma" $
+  lV "m" natT $
+  lV "f" (TIdx 1 :-> natT :-> TIdx 1) $
+  lV "x" (TIdx 2) $
+    fst :@: (m :@: step :@: start)
+      where
+        fst   = fstP :@> TIdx 3 :@> natT
+        m     = Idx 2 :@> pairT
+        step  = fs :@> TIdx 3 :@: Idx 1
+        start = xz :@> TIdx 3 :@: Idx 0
+        pairT = ForAll "a" $ (TIdx 4 :-> natT :-> TIdx 0) :-> TIdx 0
+
+
+
+-- pred
+
+pre = lV "n" natT $ rec :@> natT :@: Idx 0 :@: preFun :@: preIni
+preFun = cKastF :@> natT :@> natT
+preIni = zero
+
+
+-- fact
 
 mult = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $
   (Idx 3 :@> TIdx 1) :@: (Idx 2 :@> TIdx 1 :@: Idx 0)
 
-power = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
-  ((Idx 3 :@> (TIdx 2 :-> TIdx 2)) :@: (Idx 4 :@> TIdx 2)) :@: (Idx 1) :@: (Idx 0)
-
-pow = power
+fac = lV "n" natT $ rec :@> natT :@: Idx 0 :@: facFun :@: facIni
+facFun = lV "acc" natT $ lV "num" natT $ mult :@: (Idx 1) :@: (suc :@: Idx 0)
+facIni = one

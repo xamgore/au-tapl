@@ -8,12 +8,14 @@ infixr 3 :->
 data Type = TIdx Int         -- типовой атом как индекс Де Брауна
           | Type :-> Type    -- стрелочный тип
           | ForAll Symb Type -- полиморфный тип, Symb - справочное имя связываемой переменной
+          | Exists Symb Type -- экзистенциальный тип, Symb - справочное имя связываемой переменной
     deriving (Read,Show,Ord)
 
 instance Eq Type where
   TIdx n1     == TIdx n2     = n1 == n2
   (t1 :-> t3) == (t2 :-> t4) = t1 == t2 && t3 == t4
   ForAll _ t1 == ForAll _ t2 = t1 == t2
+  Exists _ t1 == Exists _ t2 = t1 == t2
   _           == _           = False
 
 -- Объявление либо переменная, либо тип
@@ -32,6 +34,8 @@ data Term = Idx Int
           | Term :@: Term
           | Term :@> Type
           | Lmb Decl Term
+          | As (Type,Term) Type       -- упаковка типа-свидетеля и терма в экзистенциальный тип
+          | Let (Symb,Symb) Term Term -- распаковка пакета, имена типа и терма в паре - справочные
     deriving (Read,Show,Eq,Ord)
 
 lV :: Symb -> Type -> Term -> Term
@@ -47,10 +51,12 @@ validEnv ((TDecl _  ):decls) = validEnv decls
 validEnv ((VDecl _ t):decls) = (decls ||- t) && (validEnv decls)
 
 (||-) :: Env -> Type -> Bool
-e ||- (TIdx i)     | i < length e, (TDecl _) <- (e !! i) = True
+e ||- (TIdx i)     | 0 <= i && i < length e, (TDecl _) <- (e !! i) = True
 e ||- (l :-> r)    = (e ||- l) && (e ||- r)
 e ||- (ForAll s t) = (TDecl s : e) ||- t
+e ||- (Exists s t) = (TDecl s : e) ||- t
 _ ||- _ = False
+
 
 shiftT :: Int -> Type -> Type
 shiftT = typeOn 0
@@ -58,6 +64,7 @@ shiftT = typeOn 0
 typeOn lvl val (TIdx i)     = TIdx $ if lvl <= i then i + val else i
 typeOn lvl val (tl :-> tr)  = typeOn lvl val tl :-> typeOn lvl val tr
 typeOn lvl val (ForAll s t) = ForAll s $ typeOn (succ lvl) val t
+typeOn lvl val (Exists s t) = Exists s $ typeOn (succ lvl) val t
 
 -- выполняет подстановку в целевой тип tau типа sigma
 -- вместо свободной в tau переменной типа, связанной
@@ -66,51 +73,7 @@ substTT :: Int -> Type -> Type -> Type
 substTT j sigma tau@(TIdx i) = if i == j then sigma else tau
 substTT j sigma (tl :-> tr)  = substTT j sigma tl :-> substTT j sigma tr
 substTT j sigma (ForAll s t) = ForAll s $ substTT (succ j) (shiftT 1 sigma) t
-
-shiftV :: Int -> Term -> Term
-shiftV val = on 0 where
-  on lvl (Idx i)      = Idx $ if lvl <= i then i + val else i
-  on lvl (tl :@: tr)  = on lvl tl :@: on lvl tr
-  on lvl (tl :@> ty)  = on lvl tl :@> typeOn lvl val ty
-  on lvl (Lmb d@(TDecl idx) t) = Lmb d $ on (succ lvl) t
-  on lvl (Lmb (VDecl x ty) t)  =
-    Lmb (VDecl x $ typeOn lvl val ty) (on (succ lvl) t)
-
--- выполняет подстановку в целевой терм u терма s
--- вместо свободной в u термовой переменной, связанной
--- с j-м связывателем во внешнем для u контексте.
-substVV :: Int -> Term -> Term -> Term
-substVV j s u@(Idx i)   = if i == j then s else u
-substVV j s (t1 :@: t2) = substVV j s t1 :@: substVV j s t2
-substVV j s (t1 :@> ty) = substVV j s t1 :@> ty
-substVV j s (Lmb dec t) = Lmb dec $ substVV (succ j) (shiftV 1 s) t
-
--- выполняет подстановку в целевой терм u типа tau
--- вместо свободной в u переменной типа, связанной
--- с i-м связывателем во внешнем для u контексте.
-substTV :: Int -> Type -> Term -> Term
-substTV _ _   u@(Idx _)            = u
-substTV i tau (t1 :@: t2)          = substTV i tau t1 :@: substTV i tau t2
-substTV i tau (t1 :@> ty)          = substTV i tau t1 :@> substTT i tau ty
-substTV i tau (Lmb (VDecl x ty) t) =
-  Lmb (VDecl x $ substTT i tau ty) (substTV (succ i) (shiftT 1 tau) t)
-substTV i tau (Lmb decl t) =
-  Lmb decl $ substTV (succ i) (shiftT 1 tau) t
-
-
-oneStep :: Term -> Maybe Term
-oneStep (Lmb decl t)              = Lmb decl <$> oneStep t
-oneStep (Lmb (VDecl _ _) t :@: s) = Just $ shiftV (-1) $ substVV 0 (shiftV 1 s) t
-oneStep (Lmb (TDecl _)   t :@> s) = Just $ shiftV (-1) $ substTV 0 (shiftT 1 s) t
-oneStep (tl :@: tr)               = (:@: tr) <$> oneStep tl <|> (tl :@:) <$> oneStep tr
-oneStep (tl :@> tr)               = (:@> tr) <$> oneStep tl
-oneStep _                         = Nothing
-
-
-nf :: Term -> Term
-nf t
-  | Just next <- oneStep t = nf next
-  | Nothing   <- oneStep t = t
+substTT j sigma (Exists s t) = Exists s $ substTT (succ j) (shiftT 1 sigma) t
 
 
 infer :: Env -> Term -> Maybe Type
@@ -133,9 +96,20 @@ infer e (t :@> tau)
   , Just (ForAll alpha sigma) <- infer e t
     = Just $ shiftT (-1) $ substTT 0 (shiftT 1 tau) sigma
 
+infer e (Let (alpha, x) t1 t2)
+  | Just (Exists _ sigma) <- infer e t1
+  , Just tau <- infer (VDecl x sigma : TDecl alpha : e) t2
+  , result <- shiftT (-2) tau
+  , e ||- result
+    = Just result
+
 infer e (Lmb ty@(TDecl alpha) t)
   | Just sigma <- infer (ty:e) t
     = Just $ ForAll alpha sigma
+
+infer e ((tau, t) `As` ex@(Exists alpha sigma))
+  | infer e t == Just (shiftT (-1) $ substTT 0 (shiftT 1 tau) sigma)
+    = Just ex
 
 infer _ _ = Nothing
 
@@ -193,16 +167,6 @@ eight = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@
 nine  = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0))))))))
 ten   = natAbs $ Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: (Idx 1 :@: Idx 0)))))))))
 
-
-
--- Используя разработанную вами библиотеку для работы с System F
--- в стиле Черча, реализуйте следующие функции
-
-isZero, suc, plus, mult, power :: Term
-isZero = lV "num" natT $ lT "a" $
-  (Idx 1 :@> (TIdx 0 :-> (TIdx 0 :-> TIdx 0))) :@:
-    (lV "x" (TIdx 0 :-> (TIdx 0 :-> TIdx 0)) $ fls :@> TIdx 1) :@: (tru :@> TIdx 0)
-
 suc = lV "num" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
   (Idx 1) :@: ((Idx 3 :@> TIdx 2) :@: Idx 1 :@: Idx 0)
 
@@ -212,7 +176,94 @@ plus = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
 mult = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $
   (Idx 3 :@> TIdx 1) :@: (Idx 2 :@> TIdx 1 :@: Idx 0)
 
-power = lV "n" natT $ lV "m" natT $ lT "a" $ lV "s" tArr $ lV "z" (TIdx 1) $
-  ((Idx 3 :@> (TIdx 2 :-> TIdx 2)) :@: (Idx 4 :@> TIdx 2)) :@: (Idx 1) :@: (Idx 0)
 
-pow = power
+-- Пары
+pF  = lT "sigma" $ lT "tau" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ lT "a" $ lV "f" (TIdx 4 :-> TIdx 3 :-> TIdx 0) $ Idx 0 :@: Idx 3 :@: Idx 2
+pFT = ForAll "sigma" $ ForAll "tau" $ TIdx 1 :-> TIdx 0 :-> (ForAll "a" $ (TIdx 2 :-> TIdx 1 :-> TIdx 0) :-> TIdx 0)
+pT = ForAll "a" $ (TIdx 2 :-> TIdx 1 :-> TIdx 0) :-> TIdx 0
+
+fstP = lT "sigma" $ lT "tau" $ lV "p" pT $ Idx 0 :@> TIdx 2 :@: (cKF    :@> TIdx 2 :@> TIdx 1) where
+  cKF = lT "a" $ lT "b" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ Idx 1
+sndP = lT "sigma" $ lT "tau" $ lV "p" pT $ Idx 0 :@> TIdx 1 :@: (cKastF :@> TIdx 2 :@> TIdx 1) where
+  cKastF = lT "a" $ lT "b" $ lV "x" (TIdx 1) $ lV "y" (TIdx 1) $ Idx 0
+
+
+
+-- rec
+
+-- xz (x: R) : pair R nat
+-- xz x = pair x 0
+xz = lT "R" $ lV "x" (TIdx 0) $ pF :@> TIdx 1 :@> natT :@: Idx 0 :@: zero
+
+
+-- fs (f: sigma -> nat -> sigma) (pair sigma nat) : pair sigma nat
+-- fs f p = pair (f (fst p) (snd p))  (succ (snd p))
+fs =
+  lT "sigma" $
+  lV "f" (TIdx 0 :-> natT :-> TIdx 0) $
+  lV "p" (ForAll "a" $ (sigma :-> natT :-> TIdx 0) :-> TIdx 0) $
+    pair :@: (f :@: (fst :@: p) :@: (snd :@: p)) :@: (suc :@: (snd :@: p))
+      where
+        (p, f, sigma) = (Idx 0, Idx 1, TIdx 2)
+        fst  = fstP :@> sigma :@> natT
+        snd  = sndP :@> sigma :@> natT
+        pair = pF   :@> sigma :@> natT
+
+
+-- rec (m : nat) (f : sigma -> nat -> sigma) (x : sigma) : sigma
+-- rec m f x = fst (m (fs f) (xz x))
+rec =
+  lT "sigma" $
+  lV "m" natT $
+  lV "f" (TIdx 1 :-> natT :-> TIdx 1) $
+  lV "x" (TIdx 2) $
+    fst :@: (m :@: step :@: start)
+      where
+        fst   = fstP :@> TIdx 3 :@> natT
+        m     = Idx 2 :@> pairT
+        step  = fs :@> TIdx 3 :@: Idx 1
+        start = xz :@> TIdx 3 :@: Idx 0
+        pairT = ForAll "a" $ (TIdx 4 :-> natT :-> TIdx 0) :-> TIdx 0
+
+
+
+-- pred
+
+pre = lV "n" natT $ rec :@> natT :@: Idx 0 :@: preFun :@: preIni
+preFun = cKastF :@> natT :@> natT
+preIni = zero
+
+
+-- fact
+
+fac = lV "n" natT $ rec :@> natT :@: Idx 0 :@: facFun :@: facIni
+facFun = lV "acc" natT $ lV "num" natT $ mult :@: (Idx 1) :@: (suc :@: Idx 0)
+facIni = one
+
+
+-- existential types
+
+tstP = pF :@> natT :@> (natT :-> natT) :@: two :@: (plus :@: three)
+
+tstPT = ForAll "a" $ (natT :-> (natT :-> natT) :-> TIdx 0) :-> TIdx 0
+
+tstPTEx = Exists "b" $ ForAll "a" $ (TIdx 1 :-> (TIdx 1 :-> natT) :-> TIdx 0) :-> TIdx 0
+
+packedP = (natT,tstP) `As` tstPTEx
+
+test = Let ("gamma","p") packedP testBody where
+  testBody = snd_ :@: fst_
+  fst_ = Idx 0 :@> TIdx 1            :@: (cKF    :@> TIdx 1 :@> (TIdx 1 :-> natT))
+  snd_ = Idx 0 :@> (TIdx 1 :-> natT) :@: (cKastF :@> TIdx 1 :@> (TIdx 1 :-> natT))
+
+test1 = Let ("gamma","p") packedP testBody where
+  testBody = snd_ :@: seven   -- тип seven - это natT, в snd_ ожидается "gamma"
+  snd_ = Idx 0 :@> (TIdx 1 :-> natT) :@: (cKastF :@> TIdx 1 :@> (TIdx 1 :-> natT))
+
+test2 = Let ("gamma","p") packedP testBody where
+  testBody = fst_             -- тип "gamma" локален и не может быть доступен извне
+  fst_ = Idx 0 :@> TIdx 1            :@: (cKF    :@> TIdx 1 :@> (TIdx 1 :-> natT))
+
+t1 = infer0 test == Just natT
+t2 = infer0 test1 == Nothing
+t3 = infer0 test2 == Nothing
